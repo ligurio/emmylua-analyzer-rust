@@ -159,6 +159,34 @@ mod test {
     }
 
     #[test]
+    fn test_stacked_same_var_truthiness_guards_build_semantic_model_for_name_token() {
+        let mut ws = VirtualWorkspace::new();
+        let repeated_guards = "if not value then return end\n".repeat(STACKED_TYPE_GUARDS);
+        let block = format!(
+            r#"
+        local value ---@type string?
+
+        {repeated_guards}
+        after_guard = value
+        "#,
+        );
+
+        let file_id = ws.def(&block);
+
+        assert!(
+            ws.analysis
+                .compilation
+                .get_semantic_model(file_id)
+                .is_some(),
+            "expected semantic model for stacked same-variable truthiness token repro"
+        );
+        assert_eq!(
+            ws.last_name_expr_token_ty(file_id, "value"),
+            ws.ty("string")
+        );
+    }
+
+    #[test]
     fn test_stacked_same_var_call_type_guards_build_semantic_model() {
         let mut ws = VirtualWorkspace::new();
         let repeated_guards =

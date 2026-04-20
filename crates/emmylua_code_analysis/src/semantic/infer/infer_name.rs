@@ -1,6 +1,6 @@
-use emmylua_parser::{LuaAstNode, LuaExpr, LuaIndexExpr, LuaNameExpr};
+use emmylua_parser::{LuaAstNode, LuaClosureExpr, LuaExpr, LuaIndexExpr, LuaNameExpr};
 
-use super::{InferFailReason, InferResult};
+use super::{InferFailReason, InferResult, infer_bind_value_type};
 use crate::{
     LuaDecl, LuaDeclExtra, LuaInferCache, LuaMemberId, LuaSemanticDeclId, LuaType,
     SemanticDeclLevel, TypeOps,
@@ -122,6 +122,85 @@ pub fn infer_param(db: &DbIndex, decl: &LuaDecl) -> InferResult {
     }
 
     Err(InferFailReason::UnResolveDeclType(decl.get_id()))
+}
+
+pub fn infer_param_with_cache(
+    db: &DbIndex,
+    cache: &mut LuaInferCache,
+    decl: &LuaDecl,
+) -> InferResult {
+    let (param_idx, signature_id, member_id) = match &decl.extra {
+        LuaDeclExtra::Param {
+            idx,
+            signature_id,
+            owner_member_id: closure_owner_syntax_id,
+        } => (*idx, *signature_id, *closure_owner_syntax_id),
+        _ => unreachable!(),
+    };
+
+    let mut colon_define = false;
+    if let Some(signature) = db.get_signature_index().get(&signature_id) {
+        colon_define = signature.is_colon_define;
+        if let Some(param_info) = signature.get_param_info_by_id(param_idx) {
+            let mut typ = param_info.type_ref.clone();
+            if param_info.nullable && !typ.is_nullable() {
+                typ = TypeOps::Union.apply(db, &typ, &LuaType::Nil);
+            }
+
+            return Ok(typ);
+        }
+    }
+
+    if let Some(current_member_id) = member_id {
+        let member_decl_type = find_decl_member_type(db, current_member_id)?;
+        let param_type = find_param_type_from_type(
+            db,
+            member_decl_type,
+            param_idx,
+            colon_define,
+            decl.get_name() == "...",
+        );
+        if let Some(param_type) = param_type {
+            return Ok(param_type);
+        }
+    }
+
+    if let Some(param_type) = infer_param_type_from_closure_expected_type(
+        db,
+        cache,
+        signature_id,
+        param_idx,
+        colon_define,
+        decl.get_name() == "...",
+    ) {
+        return Ok(param_type);
+    }
+
+    Err(InferFailReason::UnResolveDeclType(decl.get_id()))
+}
+
+fn infer_param_type_from_closure_expected_type(
+    db: &DbIndex,
+    cache: &mut LuaInferCache,
+    signature_id: crate::LuaSignatureId,
+    param_idx: usize,
+    colon_define: bool,
+    is_dots: bool,
+) -> Option<LuaType> {
+    let closure = find_closure_expr_by_signature_id(db, signature_id)?;
+    let source_type = infer_bind_value_type(db, cache, closure.into())?;
+    find_param_type_from_type(db, source_type, param_idx, colon_define, is_dots)
+}
+
+fn find_closure_expr_by_signature_id(
+    db: &DbIndex,
+    signature_id: crate::LuaSignatureId,
+) -> Option<LuaClosureExpr> {
+    let syntax_tree = db.get_vfs().get_syntax_tree(&signature_id.get_file_id())?;
+    syntax_tree
+        .get_chunk_node()
+        .descendants::<LuaClosureExpr>()
+        .find(|closure| closure.get_position() == signature_id.get_position())
 }
 
 pub fn find_decl_member_type(db: &DbIndex, member_id: LuaMemberId) -> InferResult {

@@ -4,8 +4,9 @@ use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaIndexExpr, LuaSyntaxKind};
 use rowan::NodeOrToken;
 
 use crate::{
-    DbIndex, LuaDecl, LuaDeclId, LuaInferCache, LuaSemanticDeclId, LuaType, ModuleInfo,
+    CompilationModuleInfo, DbIndex, LuaDecl, LuaDeclId, LuaInferCache, LuaSemanticDeclId, LuaType,
     SemanticDeclLevel, SemanticModel, infer_node_semantic_decl,
+    module_query::identity::find_compilation_module_by_path,
     semantic::semantic_info::infer_token_semantic_decl,
 };
 
@@ -108,7 +109,7 @@ fn find_enum_origin(
 pub fn parse_require_module_info<'a>(
     semantic_model: &'a SemanticModel,
     decl: &LuaDecl,
-) -> Option<&'a ModuleInfo> {
+) -> Option<&'a CompilationModuleInfo> {
     let value_syntax_id = decl.get_value_syntax_id()?;
     if value_syntax_id.get_kind() != LuaSyntaxKind::RequireCallExpr {
         return None;
@@ -139,8 +140,5 @@ pub fn parse_require_module_info<'a>(
         }
     };
 
-    semantic_model
-        .get_db()
-        .get_module_index()
-        .find_module(&module_path)
+    find_compilation_module_by_path(semantic_model.get_compilation(), &module_path)
 }

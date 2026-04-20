@@ -6,6 +6,7 @@ use crate::{
     DbIndex, FileId, InferGuardRef, LuaGenericType, LuaInstanceType, LuaIntersectionType,
     LuaMemberKey, LuaMemberOwner, LuaObjectType, LuaSemanticDeclId, LuaTupleType, LuaType,
     LuaTypeDeclId, LuaUnionType,
+    module_query::export::infer_module_export_type,
     semantic::{
         InferGuard,
         generic::{TypeSubstitutor, instantiate_type_generic},
@@ -171,11 +172,8 @@ fn find_members_guard(
         LuaType::Instance(inst) => find_instance_members(db, inst, ctx, filter),
         LuaType::Namespace(ns) => find_namespace_members(db, ctx, ns, filter),
         LuaType::ModuleRef(file_id) => {
-            let module_info = db.get_module_index().get_module(*file_id);
-            if let Some(module_info) = module_info
-                && let Some(export_type) = &module_info.export_type
-            {
-                return find_members_guard(db, export_type, ctx, filter);
+            if let Some(export_type) = infer_module_export_type(db, *file_id) {
+                return find_members_guard(db, &export_type, ctx, filter);
             }
 
             None

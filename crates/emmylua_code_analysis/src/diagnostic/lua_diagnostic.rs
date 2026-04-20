@@ -58,8 +58,8 @@ impl LuaDiagnostic {
         }
 
         let db = compilation.get_db();
-        if let Some(module_info) = db.get_module_index().get_workspace_id(file_id)
-            && !module_info.is_main()
+        if let Some(workspace_id) = compilation.module_workspace_id(file_id)
+            && !workspace_id.is_main()
         {
             return None;
         }

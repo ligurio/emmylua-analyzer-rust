@@ -1,8 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/*",
-    "tools/*",
+    "crates/emmylua_parser",
+    "crates/emmylua_diagnostic_macro",
+    "crates/emmylua_code_analysis",
+    # "tools/*",
 ]
 
 [workspace.dependencies]
@@ -65,6 +67,7 @@ reqwest = { version = "0.13.1", default-features = false, features = [
 ]}
 similar = { version = "2.7.0", features = ["inline"] }
 hashbrown = "0.16.1"
+salsa = "0.26.0"
 
 # Lint configuration for the entire workspace
 [workspace.lints.clippy]

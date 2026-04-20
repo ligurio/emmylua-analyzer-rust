@@ -6,10 +6,11 @@ mod var_ref_id;
 
 use crate::{
     CacheEntry, DbIndex, FlowAntecedent, FlowId, FlowNode, FlowTree, InferFailReason,
-    LuaInferCache, infer_param,
+    LuaInferCache, LuaType,
     semantic::infer::{
         InferResult,
         infer_name::{find_decl_member_type, infer_global_type},
+        infer_param_with_cache,
     },
 };
 pub(in crate::semantic) use condition_flow::{ConditionFlowAction, InferConditionFlow};
@@ -55,7 +56,7 @@ fn get_var_ref_type(db: &DbIndex, cache: &mut LuaInferCache, var_ref_id: &VarRef
         }
 
         if decl.is_param() {
-            return infer_param(db, decl);
+            return infer_param_with_cache(db, cache, decl);
         }
 
         Err(InferFailReason::UnResolveDeclType(decl.get_id()))

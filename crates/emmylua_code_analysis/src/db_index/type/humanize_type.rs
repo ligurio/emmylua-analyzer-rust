@@ -7,7 +7,7 @@ use crate::{
     AsyncState, DbIndex, LuaAliasCallType, LuaConditionalType, LuaFunctionType, LuaGenericType,
     LuaIntersectionType, LuaMemberKey, LuaMemberOwner, LuaObjectType, LuaSignatureId,
     LuaStringTplType, LuaTupleType, LuaType, LuaTypeDeclId, LuaUnionType, TypeSubstitutor,
-    VariadicType,
+    VariadicType, module_query::export::infer_module_export_type,
 };
 
 use super::{LuaAliasCallKind, LuaMultiLineUnion};
@@ -1009,19 +1009,15 @@ impl<'a> TypeHumanizer<'a> {
     // ─── ModuleRef ──────────────────────────────────────────────────
 
     fn write_module_ref<W: Write>(&mut self, file_id: crate::FileId, w: &mut W) -> fmt::Result {
-        if let Some(module_info) = self.db.get_module_index().get_module(file_id) {
-            if let Some(export_type) = &module_info.export_type {
-                if export_type.is_module_ref() {
-                    return w.write_str("module 'recursive'");
-                }
-                let export_type = export_type.clone();
-                self.write_type(&export_type, w)
-            } else {
-                w.write_str("module 'unknown'")
+        if let Some(export_type) = infer_module_export_type(self.db, file_id) {
+            if export_type.is_module_ref() {
+                return w.write_str("module 'recursive'");
             }
-        } else {
-            w.write_str("module 'unknown'")
+
+            return self.write_type(&export_type, w);
         }
+
+        w.write_str("module 'unknown'")
     }
 
     // ─── helper: write a table member (key: type) ───────────────────

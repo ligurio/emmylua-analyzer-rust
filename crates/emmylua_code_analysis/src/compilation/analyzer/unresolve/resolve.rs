@@ -8,15 +8,15 @@ use crate::{
     InFiled, InferFailReason, LuaDeclId, LuaMember, LuaMemberId, LuaMemberInfo, LuaMemberKey,
     LuaOperator, LuaOperatorMetaMethod, LuaOperatorOwner, LuaSemanticDeclId, LuaTypeCache,
     LuaTypeDeclId, OperatorFunction, SignatureReturnStatus, TypeOps,
+    compilation::analyze_func_body_returns_with,
     compilation::analyzer::{
         common::{add_member, bind_type},
-        lua::{
-            analyze_func_body_returns_with, analyze_return_point, infer_for_range_iter_expr_func,
-        },
+        lua::{analyze_return_point, infer_for_range_iter_expr_func},
         unresolve::UnResolveConstructor,
     },
     db_index::{DbIndex, LuaMemberOwner, LuaType},
     find_members_with_key,
+    module_query::export::infer_module_export_type,
     semantic::{LuaInferCache, infer_expr},
 };
 
@@ -226,11 +226,8 @@ pub fn try_resolve_module_ref(
     _: &mut LuaInferCache,
     module_ref: &UnResolveModuleRef,
 ) -> ResolveResult {
-    let module_index = db.get_module_index();
-    let module = module_index
-        .get_module(module_ref.module_file_id)
-        .ok_or(InferFailReason::None)?;
-    let export_type = module.export_type.clone().ok_or(InferFailReason::None)?;
+    let export_type =
+        infer_module_export_type(db, module_ref.module_file_id).ok_or(InferFailReason::None)?;
     match &module_ref.owner_id {
         LuaSemanticDeclId::LuaDecl(decl_id) => {
             db.get_type_index_mut()

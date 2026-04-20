@@ -10,11 +10,12 @@ use crate::{
         UnResolveCallClosureParams, UnResolveClosureReturn, UnResolveParentAst,
         UnResolveParentClosureParams, UnResolveReturn,
     },
+    compilation::{LuaReturnPoint, analyze_func_body_returns_with},
     db_index::{LuaDocReturnInfo, LuaSignatureId},
     infer_expr,
 };
 
-use super::{LuaAnalyzer, LuaReturnPoint, analyze_func_body_returns_with};
+use super::LuaAnalyzer;
 
 pub fn analyze_closure(analyzer: &mut LuaAnalyzer, closure: LuaClosureExpr) -> Option<()> {
     let signature_id = LuaSignatureId::from_closure(analyzer.file_id, &closure);

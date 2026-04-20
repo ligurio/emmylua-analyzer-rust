@@ -4,10 +4,7 @@ use emmylua_parser::{
     LuaAstNode, LuaClosureExpr, LuaDocTagParam, LuaDocTagReturn, LuaDocTagReturnOverload, LuaStat,
 };
 
-use crate::{
-    DiagnosticCode, LuaSemanticDeclId, LuaSignatureId, LuaType, SemanticDeclLevel, SemanticModel,
-    SignatureReturnStatus,
-};
+use crate::{DiagnosticCode, LuaSemanticDeclId, LuaType, SemanticDeclLevel, SemanticModel};
 
 use super::{Checker, DiagnosticContext, get_closure_expr_comment, get_return_stats};
 
@@ -212,15 +209,11 @@ fn get_doc_return_max_len(
     semantic_model: &SemanticModel,
     closure_expr: &LuaClosureExpr,
 ) -> Option<Option<usize>> {
-    let signature_id = LuaSignatureId::from_closure(semantic_model.get_file_id(), closure_expr);
-    let signature = semantic_model
-        .get_db()
-        .get_signature_index()
-        .get(&signature_id)?;
-    if signature.resolve_return != SignatureReturnStatus::DocResolve {
+    let (is_doc_resolved, return_type) =
+        semantic_model.infer_closure_return_info(closure_expr.clone())?;
+    if !is_doc_resolved {
         return None;
     }
-    let return_type = signature.get_return_type();
 
     Some(match return_type {
         LuaType::Variadic(variadic) => variadic.get_max_len(),

@@ -1,6 +1,6 @@
 use std::{ops::Deref, sync::Arc};
 
-use emmylua_parser::{LuaAstNode, LuaAstToken, LuaLocalName};
+use emmylua_parser::{LuaAstNode, LuaAstToken, LuaExpr, LuaLocalName, LuaNameExpr};
 use lsp_types::NumberOrString;
 use tokio_util::sync::CancellationToken;
 
@@ -127,13 +127,38 @@ impl VirtualWorkspace {
     pub fn expr_ty(&mut self, expr: &str) -> LuaType {
         let virtual_content = format!("local t = {}", expr);
         let file_id = self.def(&virtual_content);
-        let local_name = self.get_node::<LuaLocalName>(file_id);
+        let expr_node = self.get_node::<LuaExpr>(file_id);
         let semantic_model = self
             .analysis
             .compilation
             .get_semantic_model(file_id)
             .expect("Model must exist");
-        let token = local_name.get_name_token().expect("Name token must exist");
+        let info = semantic_model
+            .get_semantic_info(expr_node.syntax().clone().into())
+            .expect("Semantic info must exist");
+        info.typ
+    }
+
+    pub fn last_name_expr_token_ty(&mut self, file_id: FileId, name: &str) -> LuaType {
+        let tree = self
+            .analysis
+            .compilation
+            .get_db()
+            .get_vfs()
+            .get_syntax_tree(&file_id)
+            .expect("Tree must exist");
+        let name_expr = tree
+            .get_chunk_node()
+            .descendants::<LuaNameExpr>()
+            .filter(|name_expr| name_expr.get_name_text().as_deref() == Some(name))
+            .last()
+            .expect("Name expr must exist");
+        let token = name_expr.get_name_token().expect("Name token must exist");
+        let semantic_model = self
+            .analysis
+            .compilation
+            .get_semantic_model(file_id)
+            .expect("Model must exist");
         let info = semantic_model
             .get_semantic_info(token.syntax().clone().into())
             .expect("Semantic info must exist");

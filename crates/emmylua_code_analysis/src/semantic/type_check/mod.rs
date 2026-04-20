@@ -10,19 +10,19 @@ mod type_check_context;
 mod type_check_fail_reason;
 mod type_check_guard;
 
-use std::ops::Deref;
-
 use complex_type::check_complex_type_compact;
 use func_type::{check_doc_func_type_compact, check_sig_type_compact};
 use generic_type::check_generic_type_compact;
 use ref_type::check_ref_type_compact;
 use simple_type::check_simple_type_compact;
+use std::ops::Deref;
 pub use type_check_fail_reason::TypeCheckFailReason;
 use type_check_guard::TypeCheckGuard;
 
 use crate::{
     LuaUnionType,
     db_index::{DbIndex, LuaType},
+    module_query::export::infer_module_export_type,
     semantic::type_check::type_check_context::TypeCheckContext,
 };
 pub use sub_type::is_sub_type_of;
@@ -231,10 +231,7 @@ fn escape_type(db: &DbIndex, typ: &LuaType) -> Option<LuaType> {
         }
         LuaType::TypeGuard(_) => return Some(LuaType::Boolean),
         LuaType::ModuleRef(file_id) => {
-            let module_info = db.get_module_index().get_module(*file_id)?;
-            if let Some(export_type) = &module_info.export_type {
-                return Some(export_type.clone());
-            }
+            return infer_module_export_type(db, *file_id);
         }
         _ => {}
     }

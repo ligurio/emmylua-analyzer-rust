@@ -48,7 +48,8 @@ use rowan::TextRange;
 use std::sync::Arc;
 
 use crate::{
-    FileId, LuaType, RenderLevel, db_index::DbIndex, humanize_type, semantic::SemanticModel,
+    FileId, LuaType, RenderLevel, db_index::DbIndex, humanize_type,
+    module_query::identity::db_module_is_meta_file, semantic::SemanticModel,
 };
 
 use super::{
@@ -257,9 +258,8 @@ impl<'a> DiagnosticContext<'a> {
             return false;
         }
 
-        let module_index = db.get_module_index();
         // ignore meta file diagnostic
-        if module_index.is_meta_file(&file_id) {
+        if db_module_is_meta_file(db, file_id) {
             return false;
         }
 
@@ -302,6 +302,14 @@ pub fn get_return_stats(closure_expr: &LuaClosureExpr) -> impl Iterator<Item = L
                 .next()
                 .is_some_and(|expr| &expr == closure_expr)
         })
+}
+
+pub fn get_closure_return_info(
+    _context: &DiagnosticContext,
+    semantic_model: &SemanticModel,
+    closure_expr: &LuaClosureExpr,
+) -> Option<(bool, LuaType)> {
+    semantic_model.infer_closure_return_info(closure_expr.clone())
 }
 
 pub fn humanize_lint_type(db: &DbIndex, typ: &LuaType) -> String {

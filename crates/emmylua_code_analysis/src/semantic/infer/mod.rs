@@ -22,7 +22,7 @@ pub use infer_doc_type::{DocTypeInferContext, infer_doc_type};
 pub use infer_fail_reason::InferFailReason;
 pub use infer_index::infer_index_expr;
 use infer_name::infer_name_expr;
-pub use infer_name::{find_self_decl_or_member_id, infer_param};
+pub use infer_name::{find_self_decl_or_member_id, infer_param, infer_param_with_cache};
 use infer_table::infer_table_expr;
 pub use infer_table::{infer_table_field_value_should_be, infer_table_should_be};
 use infer_unary::infer_unary_expr;

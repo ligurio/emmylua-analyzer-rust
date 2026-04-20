@@ -1,12 +1,16 @@
 use emmylua_parser::{
-    LuaAstNode, LuaAstToken, LuaCallExpr, LuaClosureExpr, LuaExpr, LuaIndexExpr, LuaLiteralToken,
-    LuaNameExpr, LuaStat, LuaSyntaxKind,
+    LuaAstNode, LuaAstToken, LuaCallExpr, LuaClosureExpr, LuaExpr, LuaIndexExpr, LuaNameExpr,
+    LuaStat, LuaSyntaxKind,
 };
 
 use crate::{
-    DbIndex, LuaDeclId, LuaDeclOrMemberId, LuaInferCache, LuaInstanceType, LuaIntersectionType,
-    LuaMemberId, LuaMemberKey, LuaMemberOwner, LuaSemanticDeclId, LuaType, LuaTypeCache,
-    LuaTypeDeclId, LuaUnionType, TypeOps,
+    DbIndex, FileId, LuaDeclId, LuaDeclOrMemberId, LuaInferCache, LuaInstanceType,
+    LuaIntersectionType, LuaMemberId, LuaMemberKey, LuaMemberOwner, LuaSemanticDeclId, LuaType,
+    LuaTypeCache, LuaTypeDeclId, LuaUnionType, TypeOps,
+    module_query::{
+        export::{infer_module_export_type, module_export_expr},
+        identity::find_require_call_module_file_id,
+    },
     semantic::{
         infer::find_self_decl_or_member_id, member::get_buildin_type_map_type_id,
         semantic_info::resolve_global_decl_id,
@@ -33,6 +37,9 @@ pub fn infer_expr_semantic_decl(
     match expr {
         LuaExpr::NameExpr(name_expr) => {
             infer_name_expr_semantic_decl(db, cache, name_expr, semantic_guard.next_level()?, level)
+        }
+        LuaExpr::CallExpr(call_expr) if call_expr.is_require() => {
+            infer_require_module_semantic_decl(db, call_expr)
         }
         LuaExpr::IndexExpr(index_expr) => {
             infer_index_expr_semantic_decl(db, cache, index_expr, semantic_guard.next_level()?)
@@ -126,23 +133,71 @@ fn infer_require_module_semantic_decl(
     db: &DbIndex,
     call_expr: LuaCallExpr,
 ) -> Option<LuaSemanticDeclId> {
-    let first_arg = call_expr.get_args_list()?.get_args().next()?;
-    let module_path = match first_arg {
-        LuaExpr::LiteralExpr(literal_expr) => {
-            if let Some(literal_token) = literal_expr.get_literal() {
-                match literal_token {
-                    LuaLiteralToken::String(string_token) => string_token.get_value(),
-                    _ => return None,
-                }
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    };
+    let module_file_id = required_module_file_id(db, call_expr)?;
+    infer_module_export_semantic_decl(db, module_file_id)
+}
 
-    let module_info = db.get_module_index().find_module(&module_path)?;
-    module_info.semantic_id.clone()
+pub(crate) fn infer_module_export_semantic_decl(
+    db: &DbIndex,
+    file_id: FileId,
+) -> Option<LuaSemanticDeclId> {
+    let export_expr = module_export_expr(db, file_id)?;
+    module_export_semantic_decl_from_expr(db, file_id, export_expr)
+}
+
+fn required_module_file_id(db: &DbIndex, call_expr: LuaCallExpr) -> Option<FileId> {
+    find_require_call_module_file_id(db, call_expr)
+}
+
+fn module_export_semantic_decl_from_expr(
+    db: &DbIndex,
+    file_id: FileId,
+    expr: LuaExpr,
+) -> Option<LuaSemanticDeclId> {
+    match expr {
+        LuaExpr::NameExpr(name_expr) => {
+            let name = name_expr.get_name_text()?;
+            let position = name_expr.get_position();
+            if let Some(decl) = db
+                .get_decl_index()
+                .get_decl_tree(&file_id)?
+                .find_local_decl(&name, position)
+            {
+                return Some(LuaSemanticDeclId::LuaDecl(decl.get_id()));
+            }
+
+            let mut cache = LuaInferCache::new(file_id, Default::default());
+            resolve_global_decl_id(db, &mut cache, &name, Some(&name_expr))
+                .map(LuaSemanticDeclId::LuaDecl)
+        }
+        LuaExpr::IndexExpr(index_expr) => {
+            let member_id = LuaMemberId::new(index_expr.get_syntax_id(), file_id);
+            db.get_member_index()
+                .get_member(&member_id)
+                .map(|_| LuaSemanticDeclId::Member(member_id))
+                .or_else(|| {
+                    let mut cache = LuaInferCache::new(file_id, Default::default());
+                    infer_expr_semantic_decl(
+                        db,
+                        &mut cache,
+                        LuaExpr::IndexExpr(index_expr),
+                        SemanticDeclGuard::default(),
+                        SemanticDeclLevel::default(),
+                    )
+                })
+        }
+        LuaExpr::ClosureExpr(closure_expr) => Some(LuaSemanticDeclId::Signature(
+            crate::LuaSignatureId::from_closure(file_id, &closure_expr),
+        )),
+        LuaExpr::TableExpr(table_expr) => Some(LuaSemanticDeclId::LuaDecl(LuaDeclId::new(
+            file_id,
+            table_expr.get_position(),
+        ))),
+        LuaExpr::ParenExpr(paren_expr) => {
+            module_export_semantic_decl_from_expr(db, file_id, paren_expr.get_expr()?)
+        }
+        _ => None,
+    }
 }
 
 fn get_name_decl_id(
@@ -305,18 +360,14 @@ fn infer_member_semantic_decl_by_member_key(
         ),
         LuaType::Global => infer_global_member_semantic_decl_by_member_key(db, cache, member_key),
         LuaType::ModuleRef(file_id) => {
-            let module_info = db.get_module_index().get_module(*file_id)?;
-            if let Some(export_type) = &module_info.export_type {
-                infer_member_semantic_decl_by_member_key(
-                    db,
-                    cache,
-                    export_type,
-                    member_key,
-                    semantic_guard.next_level()?,
-                )
-            } else {
-                None
-            }
+            let export_type = infer_module_export_type(db, *file_id)?;
+            infer_member_semantic_decl_by_member_key(
+                db,
+                cache,
+                &export_type,
+                member_key,
+                semantic_guard.next_level()?,
+            )
         }
         LuaType::Intersection(intersection_type) => infer_intersection_member_semantic_info(
             db,

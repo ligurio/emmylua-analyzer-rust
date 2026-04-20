@@ -17,8 +17,8 @@ use std::sync::Arc;
 pub use cache::{CacheEntry, CacheOptions, LuaAnalysisPhase, LuaInferCache};
 pub use decl::{enum_variable_is_param, parse_require_module_info};
 use emmylua_parser::{
-    LuaCallExpr, LuaChunk, LuaExpr, LuaIndexExpr, LuaIndexKey, LuaParseError, LuaSyntaxNode,
-    LuaSyntaxToken, LuaTableExpr,
+    LuaAstNode, LuaCallExpr, LuaChunk, LuaClosureExpr, LuaExpr, LuaIndexExpr, LuaIndexKey,
+    LuaParseError, LuaSyntaxNode, LuaSyntaxToken, LuaTableExpr,
 };
 pub use infer::infer_index_expr;
 use infer::{infer_bind_value_type, infer_expr_list_types};
@@ -32,12 +32,13 @@ use member::{
     get_member_map_in_scope,
 };
 use reference::is_reference_to;
-use rowan::{NodeOrToken, TextRange};
+use rowan::{NodeOrToken, TextRange, TextSize};
 pub use semantic_info::SemanticInfo;
 pub(crate) use semantic_info::{infer_node_semantic_decl, resolve_global_decl_id};
 use semantic_info::{
     infer_node_semantic_info, infer_token_semantic_decl, infer_token_semantic_info,
 };
+use smol_str::SmolStr;
 pub(crate) use type_check::check_type_compact;
 use type_check::is_sub_type_of;
 pub use visibility::check_module_visibility;
@@ -45,12 +46,22 @@ use visibility::check_visibility;
 
 pub use crate::semantic::member::find_members_with_key;
 use crate::semantic::type_check::check_type_compact_detail;
-use crate::{Emmyrc, LuaDocument, LuaSemanticDeclId, ModuleInfo, db_index::LuaTypeDeclId};
 use crate::{
-    FileId,
+    AsyncState, Emmyrc, LuaDeclId, LuaDocument, LuaSemanticDeclId, LuaSignatureId,
+    SalsaCallExplainSummary, SalsaDocTypeLoweredKind, SalsaDocTypeLoweredObjectFieldKey,
+    SalsaDocTypeNodeKey, SalsaGlobalRootSummary, SalsaMemberRootSummary, SalsaMemberTargetSummary,
+    SalsaSemanticDeclSummary, SalsaSemanticMemberSummary, SalsaSemanticSignatureSummary,
+    SalsaSignatureExplainSummary, SalsaSignatureTypeExplainSummary, SalsaSummaryHost,
+    SalsaSyntaxIdSummary, SalsaTypeCandidateSummary, db_index::LuaTypeDeclId,
+};
+use crate::{
+    CompilationModuleInfo, FileId, LuaCompilation,
     db_index::{DbIndex, LuaType},
 };
-use crate::{LuaFunctionType, LuaMemberId, LuaMemberKey, LuaTypeOwner};
+use crate::{
+    LuaArrayType, LuaFunctionType, LuaIndexAccessKey, LuaIntersectionType, LuaMemberId,
+    LuaMemberKey, LuaObjectType, LuaTupleStatus, LuaTupleType, LuaTypeOwner, VariadicType,
+};
 pub use generic::*;
 pub use guard::{InferGuard, InferGuardRef};
 pub use infer::InferFailReason;
@@ -67,7 +78,9 @@ pub use infer::{DocTypeInferContext, infer_doc_type};
 #[derive(Debug)]
 pub struct SemanticModel<'a> {
     file_id: FileId,
+    compilation: &'a LuaCompilation,
     db: &'a DbIndex,
+    summary: &'a SalsaSummaryHost,
     infer_cache: RefCell<LuaInferCache>,
     emmyrc: Arc<Emmyrc>,
     root: LuaChunk,
@@ -79,14 +92,18 @@ unsafe impl<'a> Sync for SemanticModel<'a> {}
 impl<'a> SemanticModel<'a> {
     pub fn new(
         file_id: FileId,
+        compilation: &'a LuaCompilation,
         db: &'a DbIndex,
+        summary: &'a SalsaSummaryHost,
         infer_config: LuaInferCache,
         emmyrc: Arc<Emmyrc>,
         root: LuaChunk,
     ) -> Self {
         Self {
             file_id,
+            compilation,
             db,
+            summary,
             infer_cache: RefCell::new(infer_config),
             emmyrc,
             root,
@@ -100,8 +117,16 @@ impl<'a> SemanticModel<'a> {
             .expect("always exists")
     }
 
-    pub fn get_module(&self) -> Option<&ModuleInfo> {
-        self.db.get_module_index().get_module(self.file_id)
+    pub fn get_module(&self) -> Option<&CompilationModuleInfo> {
+        self.compilation.find_module_by_file_id(self.file_id)
+    }
+
+    pub fn get_compilation(&self) -> &LuaCompilation {
+        self.compilation
+    }
+
+    pub fn get_summary(&self) -> &SalsaSummaryHost {
+        self.summary
     }
 
     pub fn get_document_by_file_id(&'_ self, file_id: FileId) -> Option<LuaDocument<'_>> {
@@ -127,6 +152,13 @@ impl<'a> SemanticModel<'a> {
     }
 
     pub fn infer_expr(&self, expr: LuaExpr) -> Result<LuaType, InferFailReason> {
+        if let LuaExpr::CallExpr(call_expr) = expr.clone()
+            && call_expr.is_require()
+            && let Some(typ) = self.summary_require_module_export_type(call_expr)
+        {
+            return Ok(typ);
+        }
+
         infer_expr(self.db, &mut self.infer_cache.borrow_mut(), expr)
     }
 
@@ -181,6 +213,74 @@ impl<'a> SemanticModel<'a> {
         .ok()
     }
 
+    pub fn call_explain(&self, call_expr: LuaCallExpr) -> Option<SalsaCallExplainSummary> {
+        self.summary
+            .semantic()
+            .file()
+            .call_explain(self.file_id, call_expr.get_position())
+    }
+
+    pub fn signature_explain(
+        &self,
+        signature_id: LuaSignatureId,
+    ) -> Option<SalsaSignatureExplainSummary> {
+        self.signature_summary(signature_id)
+            .map(|summary| summary.explain)
+    }
+
+    pub fn signature_summary(
+        &self,
+        signature_id: LuaSignatureId,
+    ) -> Option<SalsaSemanticSignatureSummary> {
+        self.summary
+            .semantic()
+            .file()
+            .signature_summary(self.file_id, signature_id.get_position())
+    }
+
+    pub fn decl_summary(&self, decl_id: LuaDeclId) -> Option<SalsaSemanticDeclSummary> {
+        self.summary
+            .semantic()
+            .file()
+            .decl_summary(decl_id.file_id, u32::from(decl_id.position).into())
+    }
+
+    pub fn member_summary(&self, member_id: LuaMemberId) -> Option<SalsaSemanticMemberSummary> {
+        self.summary.semantic().file().member_summary_by_syntax_id(
+            member_id.file_id,
+            SalsaSyntaxIdSummary::from(*member_id.get_syntax_id()),
+        )
+    }
+
+    pub fn infer_member_owner_type(&self, member_id: LuaMemberId) -> Option<LuaType> {
+        let member_summary = self.member_summary(member_id)?;
+        self.infer_member_target_owner_type(member_id.file_id, &member_summary.member_type.target)
+    }
+
+    pub fn infer_member_access_owner_type(&self, member_id: LuaMemberId) -> Option<LuaType> {
+        if let Some(LuaSemanticDeclId::Member(origin_member_id)) =
+            self.get_member_origin_owner(member_id)
+        {
+            if let Some(owner_type) = self.infer_member_owner_type(origin_member_id) {
+                return Some(owner_type);
+            }
+
+            if let Some(owner_type) = self.infer_member_owner_type_from_syntax(origin_member_id) {
+                return Some(owner_type);
+            }
+        }
+
+        self.infer_member_owner_type(member_id)
+            .or_else(|| self.infer_member_owner_type_from_syntax(member_id))
+    }
+
+    pub fn resolved_call_signature_id(&self, call_expr: LuaCallExpr) -> Option<LuaSignatureId> {
+        let call_explain = self.call_explain(call_expr)?;
+        call_explain
+            .resolved_signature_offset
+            .map(|offset| LuaSignatureId::new(self.file_id, offset))
+    }
+
     /// 推断表达式列表类型, 位于最后的表达式会触发多值推断
     pub fn infer_expr_list_types(
         &self,
@@ -196,7 +296,405 @@ impl<'a> SemanticModel<'a> {
 
     /// 推断值已经绑定的类型(不是推断值的类型). 例如从右值推断左值类型, 从调用参数推断函数参数类型
     pub fn infer_bind_value_type(&self, expr: LuaExpr) -> Option<LuaType> {
+        if let Some(typ) = self.summary_call_arg_expected_type(expr.clone()) {
+            return Some(typ);
+        }
+
         infer_bind_value_type(self.db, &mut self.infer_cache.borrow_mut(), expr)
+    }
+
+    pub fn infer_closure_return_info(&self, closure: LuaClosureExpr) -> Option<(bool, LuaType)> {
+        let typ = self
+            .infer_bind_value_type(closure.clone().into())
+            .unwrap_or(LuaType::Unknown);
+
+        match typ {
+            LuaType::DocFunction(func_type) => {
+                return Some((true, func_type.get_ret().clone()));
+            }
+            LuaType::Signature(signature_id) => {
+                let signature = self.db.get_signature_index().get(&signature_id)?;
+                return Some((
+                    signature.resolve_return == crate::SignatureReturnStatus::DocResolve,
+                    signature.get_return_type(),
+                ));
+            }
+            _ => {}
+        }
+
+        let signature_id = LuaSignatureId::from_closure(self.file_id, &closure);
+        let signature = self.db.get_signature_index().get(&signature_id)?;
+        Some((
+            signature.resolve_return == crate::SignatureReturnStatus::DocResolve,
+            signature.get_return_type(),
+        ))
+    }
+
+    fn summary_program_point_type(&self, expr: LuaExpr) -> Option<LuaType> {
+        let program_point_offset = TextSize::from(u32::from(expr.get_position()));
+        match expr {
+            LuaExpr::CallExpr(call_expr) if call_expr.is_require() => {
+                self.summary_require_module_export_type(call_expr)
+            }
+            LuaExpr::NameExpr(_) => self
+                .summary
+                .types()
+                .name_at(self.file_id, program_point_offset, program_point_offset)
+                .and_then(|info| self.summary_candidates_to_lua_type(&info.candidates)),
+            LuaExpr::IndexExpr(_) => self
+                .summary
+                .types()
+                .member_at(self.file_id, program_point_offset, program_point_offset)
+                .and_then(|info| self.summary_candidates_to_lua_type(&info.candidates)),
+            _ => None,
+        }
+    }
+
+    fn summary_candidates_to_lua_type(
+        &self,
+        candidates: &[SalsaTypeCandidateSummary],
+    ) -> Option<LuaType> {
+        let types = candidates
+            .iter()
+            .filter_map(|candidate| self.summary_candidate_to_lua_type(candidate))
+            .collect::<Vec<_>>();
+
+        match types.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => Some(LuaType::from_vec(types)),
+        }
+    }
+
+    fn summary_candidate_to_lua_type(
+        &self,
+        candidate: &SalsaTypeCandidateSummary,
+    ) -> Option<LuaType> {
+        let mut types = candidate
+            .explicit_type_offsets
+            .iter()
+            .filter_map(|type_key| self.summary_type_key_to_lua_type(*type_key))
+            .collect::<Vec<_>>();
+
+        if types.is_empty()
+            && let Some(initializer_offset) = candidate.initializer_offset
+            && let Some(expr) = self.find_expr_at_offset(initializer_offset)
+            && let Ok(expr_type) = infer_expr(self.db, &mut self.infer_cache.borrow_mut(), expr)
+        {
+            types.push(expr_type);
+        }
+
+        if types.is_empty()
+            && let Some(signature_offset) = candidate.signature_offset
+        {
+            types.push(LuaType::Signature(LuaSignatureId::new(
+                self.file_id,
+                signature_offset,
+            )));
+        }
+
+        match types.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => Some(LuaType::from_vec(types)),
+        }
+    }
+
+    fn summary_type_key_to_lua_type(&self, type_key: SalsaDocTypeNodeKey) -> Option<LuaType> {
+        let resolved = self
+            .summary
+            .doc()
+            .resolved_type_by_key(self.file_id, type_key)?;
+        self.summary_lowered_type_to_lua_type(&resolved.lowered.kind)
+    }
+
+    fn summary_lowered_type_to_lua_type(&self, kind: &SalsaDocTypeLoweredKind) -> Option<LuaType> {
+        match kind {
+            SalsaDocTypeLoweredKind::Unknown => Some(LuaType::Unknown),
+            SalsaDocTypeLoweredKind::Name { name } => self.summary_named_type_to_lua_type(name),
+            SalsaDocTypeLoweredKind::Literal { text } => {
+                self.summary_literal_type_to_lua_type(text)
+            }
+            SalsaDocTypeLoweredKind::Nullable { inner_type } => {
+                let inner = self.summary_type_ref_to_lua_type(inner_type)?;
+                Some(LuaType::from_vec(vec![inner, LuaType::Nil]))
+            }
+            SalsaDocTypeLoweredKind::Union { item_types }
+            | SalsaDocTypeLoweredKind::MultiLineUnion { item_types }
+            | SalsaDocTypeLoweredKind::Tuple { item_types } => {
+                let types = item_types
+                    .iter()
+                    .filter_map(|type_ref| self.summary_type_ref_to_lua_type(type_ref))
+                    .collect::<Vec<_>>();
+                match types.as_slice() {
+                    [] => None,
+                    [single] => Some(single.clone()),
+                    _ => Some(LuaType::from_vec(types)),
+                }
+            }
+            SalsaDocTypeLoweredKind::Intersection { item_types } => {
+                let types = item_types
+                    .iter()
+                    .filter_map(|type_ref| self.summary_type_ref_to_lua_type(type_ref))
+                    .collect::<Vec<_>>();
+                (!types.is_empty()).then_some(LuaIntersectionType::new(types).into())
+            }
+            SalsaDocTypeLoweredKind::Array { item_type } => self
+                .summary_type_ref_to_lua_type(item_type)
+                .map(|base| LuaType::Array(LuaArrayType::from_base_type(base).into())),
+            SalsaDocTypeLoweredKind::Function {
+                is_async,
+                is_sync,
+                params,
+                returns,
+                ..
+            } => {
+                let async_state = if *is_async {
+                    AsyncState::Async
+                } else if *is_sync {
+                    AsyncState::Sync
+                } else {
+                    AsyncState::None
+                };
+                let params = params
+                    .iter()
+                    .map(|param| {
+                        let mut typ = self.summary_type_ref_to_lua_type(&param.doc_type);
+                        if param.is_nullable {
+                            typ = match typ {
+                                Some(typ) if !typ.is_nullable() => {
+                                    Some(LuaType::from_vec(vec![typ, LuaType::Nil]))
+                                }
+                                other => other,
+                            };
+                        }
+                        if param.is_dots {
+                            typ = Some(match typ {
+                                Some(typ) => LuaType::Variadic(VariadicType::Base(typ).into()),
+                                None => LuaType::Variadic(VariadicType::Base(LuaType::Any).into()),
+                            });
+                        }
+
+                        (param.name.clone().unwrap_or_default().to_string(), typ)
+                    })
+                    .collect::<Vec<_>>();
+                let return_types = returns
+                    .iter()
+                    .filter_map(|ret| self.summary_type_ref_to_lua_type(&ret.doc_type))
+                    .collect::<Vec<_>>();
+                let ret = match return_types.as_slice() {
+                    [] => LuaType::Unknown,
+                    [single] => single.clone(),
+                    _ => LuaTupleType::new(return_types, LuaTupleStatus::DocResolve).into(),
+                };
+
+                Some(LuaFunctionType::new(async_state, false, false, params, ret).into())
+            }
+            SalsaDocTypeLoweredKind::Object { fields } => {
+                let object_fields = fields
+                    .iter()
+                    .filter_map(|field| {
+                        let key = match &field.key {
+                            SalsaDocTypeLoweredObjectFieldKey::Name(name)
+                            | SalsaDocTypeLoweredObjectFieldKey::String(name) => {
+                                LuaIndexAccessKey::String(name.clone())
+                            }
+                            SalsaDocTypeLoweredObjectFieldKey::Integer(value) => {
+                                LuaIndexAccessKey::Integer(*value)
+                            }
+                            SalsaDocTypeLoweredObjectFieldKey::Type(type_ref) => {
+                                LuaIndexAccessKey::Type(
+                                    self.summary_type_ref_to_lua_type(type_ref)?,
+                                )
+                            }
+                        };
+                        let value_type = self.summary_type_ref_to_lua_type(&field.value_type)?;
+                        Some((key, value_type))
+                    })
+                    .collect::<Vec<_>>();
+                Some(LuaObjectType::new(object_fields).into())
+            }
+            SalsaDocTypeLoweredKind::Variadic { item_type } => self
+                .summary_type_ref_to_lua_type(item_type)
+                .map(|base| LuaType::Variadic(VariadicType::Base(base).into())),
+            _ => None,
+        }
+    }
+
+    fn summary_signature_type_to_lua_type(
+        &self,
+        typ: &SalsaSignatureTypeExplainSummary,
+    ) -> Option<LuaType> {
+        if let Some(lowered) = &typ.lowered {
+            return self.summary_lowered_type_to_lua_type(&lowered.kind);
+        }
+
+        self.summary_type_ref_to_lua_type(&typ.type_ref)
+    }
+
+    fn summary_call_arg_expected_type(&self, expr: LuaExpr) -> Option<LuaType> {
+        let call_arg_list = expr.get_parent::<emmylua_parser::LuaCallArgList>()?;
+        let call_expr = call_arg_list.get_parent::<LuaCallExpr>()?;
+        let arg_index = call_arg_list.get_args().position(|arg| arg == expr)?;
+        let call_explain = self.call_explain(call_expr)?;
+        let expected = call_explain
+            .args
+            .get(arg_index)?
+            .expected_doc_type
+            .as_ref()?;
+        self.summary_signature_type_to_lua_type(expected)
+    }
+
+    fn summary_type_ref_to_lua_type(&self, type_ref: &crate::SalsaDocTypeRef) -> Option<LuaType> {
+        let crate::SalsaDocTypeRef::Node(type_key) = type_ref else {
+            return None;
+        };
+
+        self.summary_type_key_to_lua_type(*type_key)
+    }
+
+    fn summary_named_type_to_lua_type(&self, name: &str) -> Option<LuaType> {
+        self.named_type_to_lua_type_in_file(self.file_id, name)
+    }
+
+    fn named_type_to_lua_type_in_file(&self, file_id: FileId, name: &str) -> Option<LuaType> {
+        let builtin = match name {
+            "unknown" => Some(LuaType::Unknown),
+            "any" => Some(LuaType::Any),
+            "nil" => Some(LuaType::Nil),
+            "table" => Some(LuaType::Table),
+            "userdata" => Some(LuaType::Userdata),
+            "function" | "fun" => Some(LuaType::Function),
+            "thread" => Some(LuaType::Thread),
+            "boolean" | "bool" => Some(LuaType::Boolean),
+            "string" => Some(LuaType::String),
+            "integer" => Some(LuaType::Integer),
+            "number" => Some(LuaType::Number),
+            "io" => Some(LuaType::Io),
+            _ => None,
+        };
+        if builtin.is_some() {
+            return builtin;
+        }
+
+        let type_decl = self.db.get_type_index().find_type_decl(
+            file_id,
+            name,
+            self.db.resolve_workspace_id(file_id),
+        )?;
+        Some(LuaType::Ref(type_decl.get_id()))
+    }
+
+    fn infer_member_target_owner_type(
+        &self,
+        file_id: FileId,
+        target: &SalsaMemberTargetSummary,
+    ) -> Option<LuaType> {
+        let mut owner_type = match &target.root {
+            SalsaMemberRootSummary::Global(SalsaGlobalRootSummary::Env) => LuaType::Global,
+            SalsaMemberRootSummary::Global(SalsaGlobalRootSummary::Name(name)) => {
+                let global_decl_id =
+                    resolve_global_decl_id(self.db, &mut self.infer_cache.borrow_mut(), name, None);
+
+                global_decl_id
+                    .map(|decl_id| self.get_type(decl_id.into()))
+                    .or_else(|| self.named_type_to_lua_type_in_file(file_id, name))?
+            }
+            SalsaMemberRootSummary::LocalDecl { decl_id, .. } => {
+                self.get_type(LuaDeclId::new(file_id, decl_id.as_u32().into()).into())
+            }
+        };
+
+        for segment in target.owner_segments.iter() {
+            owner_type = self
+                .infer_member_type(&owner_type, &LuaMemberKey::from(segment.as_str()))
+                .ok()?;
+        }
+
+        Some(owner_type)
+    }
+
+    fn infer_member_owner_type_from_syntax(&self, member_id: LuaMemberId) -> Option<LuaType> {
+        let root = self
+            .db
+            .get_vfs()
+            .get_syntax_tree(&member_id.file_id)?
+            .get_red_root();
+        let cur_node = member_id.get_syntax_id().to_node_from_root(&root)?;
+        let index_expr = LuaIndexExpr::cast(cur_node)?;
+
+        index_expr.get_prefix_expr().map(|prefix_expr| {
+            self.infer_expr(prefix_expr.clone())
+                .unwrap_or(LuaType::SelfInfer)
+        })
+    }
+
+    fn summary_literal_type_to_lua_type(&self, text: &str) -> Option<LuaType> {
+        match text {
+            "true" => return Some(LuaType::DocBooleanConst(true)),
+            "false" => return Some(LuaType::DocBooleanConst(false)),
+            "nil" => return Some(LuaType::Nil),
+            _ => {}
+        }
+
+        if let Ok(value) = text.parse::<i64>() {
+            return Some(LuaType::DocIntegerConst(value));
+        }
+        if let Ok(value) = text.parse::<f64>() {
+            return Some(LuaType::FloatConst(value));
+        }
+
+        let unquoted = match text.as_bytes() {
+            [b'"', .., b'"'] | [b'\'', .., b'\''] if text.len() >= 2 => {
+                Some(&text[1..text.len() - 1])
+            }
+            _ => None,
+        };
+
+        unquoted.map(|value| LuaType::DocStringConst(SmolStr::new(value).into()))
+    }
+
+    fn find_expr_at_offset(&self, syntax_offset: TextSize) -> Option<LuaExpr> {
+        self.root
+            .descendants::<LuaExpr>()
+            .find(|expr| expr.get_position() == syntax_offset)
+    }
+
+    fn summary_semantic_info_for_expr_node(&self, node: LuaSyntaxNode) -> Option<SemanticInfo> {
+        if !LuaExpr::can_cast(node.kind().into()) {
+            return None;
+        }
+
+        let expr = LuaExpr::cast(node.clone())?;
+        let typ = self.summary_program_point_type(expr.clone())?;
+        let semantic_decl = self.summary_expr_semantic_decl(&expr).or_else(|| {
+            infer_node_semantic_decl(
+                self.db,
+                &mut self.infer_cache.borrow_mut(),
+                node,
+                SemanticDeclLevel::default(),
+            )
+        });
+        Some(SemanticInfo { typ, semantic_decl })
+    }
+
+    fn summary_semantic_info_for_expr_token(&self, token: LuaSyntaxToken) -> Option<SemanticInfo> {
+        let parent = token.parent()?;
+        if !LuaExpr::can_cast(parent.kind().into()) {
+            return None;
+        }
+
+        let expr = LuaExpr::cast(parent)?;
+        let typ = self.summary_program_point_type(expr.clone())?;
+        let semantic_decl = self.summary_expr_semantic_decl(&expr).or_else(|| {
+            infer_token_semantic_decl(
+                self.db,
+                &mut self.infer_cache.borrow_mut(),
+                token,
+                SemanticDeclLevel::default(),
+            )
+        });
+        Some(SemanticInfo { typ, semantic_decl })
     }
 
     pub fn get_semantic_info(
@@ -205,9 +703,17 @@ impl<'a> SemanticModel<'a> {
     ) -> Option<SemanticInfo> {
         match node_or_token {
             NodeOrToken::Node(node) => {
+                if let Some(info) = self.summary_semantic_info_for_expr_node(node.clone()) {
+                    return Some(info);
+                }
+
                 infer_node_semantic_info(self.db, &mut self.infer_cache.borrow_mut(), node)
             }
             NodeOrToken::Token(token) => {
+                if let Some(info) = self.summary_semantic_info_for_expr_token(token.clone()) {
+                    return Some(info);
+                }
+
                 infer_token_semantic_info(self.db, &mut self.infer_cache.borrow_mut(), token)
             }
         }
@@ -219,9 +725,16 @@ impl<'a> SemanticModel<'a> {
         level: SemanticDeclLevel,
     ) -> Option<LuaSemanticDeclId> {
         match node_or_token {
-            NodeOrToken::Node(node) => {
-                infer_node_semantic_decl(self.db, &mut self.infer_cache.borrow_mut(), node, level)
-            }
+            NodeOrToken::Node(node) => LuaExpr::cast(node.clone())
+                .and_then(|expr| self.summary_expr_semantic_decl(&expr))
+                .or_else(|| {
+                    infer_node_semantic_decl(
+                        self.db,
+                        &mut self.infer_cache.borrow_mut(),
+                        node,
+                        level,
+                    )
+                }),
             NodeOrToken::Token(token) => {
                 infer_token_semantic_decl(self.db, &mut self.infer_cache.borrow_mut(), token, level)
             }
@@ -317,8 +830,41 @@ impl<'a> SemanticModel<'a> {
         find_member_origin_owner(self.db, &mut self.infer_cache.borrow_mut(), member_id)
     }
 
+    fn summary_expr_semantic_decl(&self, expr: &LuaExpr) -> Option<LuaSemanticDeclId> {
+        match expr {
+            LuaExpr::CallExpr(call_expr) if call_expr.is_require() => {
+                self.summary_require_module_semantic_decl(call_expr.clone())
+            }
+            _ => self.summary_module_export_semantic_decl(expr.clone()),
+        }
+    }
+
+    fn summary_module_export_semantic_decl(&self, expr: LuaExpr) -> Option<LuaSemanticDeclId> {
+        let export_expr = crate::module_query::export::module_export_expr(self.db, self.file_id)?;
+        if export_expr.syntax() != expr.syntax() {
+            return None;
+        }
+
+        crate::module_query::export::compilation_module_semantic_id(self.compilation, self.file_id)
+    }
+
     pub fn get_index_decl_type(&self, index_expr: LuaIndexExpr) -> Option<LuaType> {
         let cache = &mut self.infer_cache.borrow_mut();
         infer_index_expr(self.db, cache, index_expr, false).ok()
+    }
+
+    fn summary_require_module_export_type(&self, call_expr: LuaCallExpr) -> Option<LuaType> {
+        let module_path = crate::module_query::identity::require_call_module_path(call_expr)?;
+        self.compilation
+            .find_required_module_export_type(&module_path)
+    }
+
+    fn summary_require_module_semantic_decl(
+        &self,
+        call_expr: LuaCallExpr,
+    ) -> Option<LuaSemanticDeclId> {
+        let module_path = crate::module_query::identity::require_call_module_path(call_expr)?;
+        self.compilation
+            .find_required_module_semantic_id(&module_path)
     }
 }

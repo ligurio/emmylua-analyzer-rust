@@ -1,6 +1,6 @@
 use std::{ops::Deref, sync::Arc};
 
-use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaExpr, LuaIndexExpr};
+use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaExpr};
 
 use crate::{
     DbIndex, DocTypeInferContext, GenericTplId, LuaFunctionType, LuaSemanticDeclId, LuaType,
@@ -119,22 +119,9 @@ fn infer_call_source_type(
             )?;
 
             if let LuaSemanticDeclId::Member(member_id) = decl
-                && let Some(LuaSemanticDeclId::Member(member_id)) =
-                    semantic_model.get_member_origin_owner(member_id)
+                && let Some(owner_type) = semantic_model.infer_member_access_owner_type(member_id)
             {
-                let root = semantic_model
-                    .get_db()
-                    .get_vfs()
-                    .get_syntax_tree(&member_id.file_id)?
-                    .get_red_root();
-                let cur_node = member_id.get_syntax_id().to_node_from_root(&root)?;
-                let index_expr = LuaIndexExpr::cast(cur_node)?;
-
-                return index_expr.get_prefix_expr().map(|prefix_expr| {
-                    semantic_model
-                        .infer_expr(prefix_expr.clone())
-                        .unwrap_or(LuaType::SelfInfer)
-                });
+                return Some(owner_type);
             }
 
             return if let Some(prefix_expr) = index_expr.get_prefix_expr() {
@@ -152,19 +139,7 @@ fn infer_call_source_type(
                 SemanticDeclLevel::default(),
             )?;
             if let LuaSemanticDeclId::Member(member_id) = decl {
-                let root = semantic_model
-                    .get_db()
-                    .get_vfs()
-                    .get_syntax_tree(&member_id.file_id)?
-                    .get_red_root();
-                let cur_node = member_id.get_syntax_id().to_node_from_root(&root)?;
-                let index_expr = LuaIndexExpr::cast(cur_node)?;
-
-                return index_expr.get_prefix_expr().map(|prefix_expr| {
-                    semantic_model
-                        .infer_expr(prefix_expr.clone())
-                        .unwrap_or(LuaType::SelfInfer)
-                });
+                return semantic_model.infer_member_access_owner_type(member_id);
             }
 
             return None;
@@ -202,6 +177,17 @@ fn infer_call_doc_function(
     let function = semantic_model.infer_expr(prefix_expr).ok()?;
     match function {
         LuaType::Signature(signature_id) => {
+            if let Some(resolved_signature_id) =
+                semantic_model.resolved_call_signature_id(call_expr.clone())
+                && let Some(signature) = semantic_model
+                    .get_db()
+                    .get_signature_index()
+                    .get(&resolved_signature_id)
+                && signature.overloads.is_empty()
+            {
+                return Some(signature.to_doc_func_type());
+            }
+
             let signature = semantic_model
                 .get_db()
                 .get_signature_index()

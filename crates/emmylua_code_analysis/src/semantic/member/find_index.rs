@@ -4,6 +4,7 @@ use crate::{
     DbIndex, InFiled, InferGuardRef, LuaGenericType, LuaIntersectionType, LuaMemberKey,
     LuaMemberOwner, LuaObjectType, LuaOperatorMetaMethod, LuaOperatorOwner, LuaSemanticDeclId,
     LuaType, LuaTypeDeclId, LuaUnionType, TypeOps,
+    module_query::export::infer_module_export_type,
     semantic::{
         InferGuard,
         generic::{TypeSubstitutor, instantiate_type_generic},
@@ -39,11 +40,8 @@ pub fn find_index_operations_guard(
             find_index_operations_guard(db, base, infer_guard)
         }
         LuaType::ModuleRef(file_id) => {
-            let module_info = db.get_module_index().get_module(*file_id);
-            if let Some(module_info) = module_info
-                && let Some(export_type) = &module_info.export_type
-            {
-                return find_index_operations_guard(db, export_type, infer_guard);
+            if let Some(export_type) = infer_module_export_type(db, *file_id) {
+                return find_index_operations_guard(db, &export_type, infer_guard);
             }
 
             None

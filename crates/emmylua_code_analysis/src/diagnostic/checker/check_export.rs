@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use emmylua_parser::{LuaAst, LuaAstNode, LuaCallExpr, LuaIndexExpr, LuaVarExpr};
 
 use crate::{
-    DiagnosticCode, LuaSemanticDeclId, LuaType, ModuleInfo, SemanticDeclLevel, SemanticModel,
+    CompilationModuleInfo, DiagnosticCode, LuaSemanticDeclId, LuaType, SemanticDeclLevel,
+    SemanticModel,
+    module_query::export::{compilation_module_has_export_type, compilation_module_semantic_id},
+    module_query::identity::find_compilation_module_by_path,
     parse_require_module_info,
 };
 
@@ -150,8 +153,9 @@ fn check_export_index_expr(
     let Some(module_info) = semantic_model.get_module() else {
         return Some(());
     };
-    if !module_info.has_export_type()
-        || module_info.semantic_id.as_ref() != Some(&LuaSemanticDeclId::LuaDecl(decl_id))
+    if !compilation_module_has_export_type(semantic_model.get_compilation(), module_info.file_id)
+        || compilation_module_semantic_id(semantic_model.get_compilation(), module_info.file_id)
+            != Some(LuaSemanticDeclId::LuaDecl(decl_id))
     {
         return Some(());
     }
@@ -176,12 +180,13 @@ fn check_export_index_expr(
 fn check_require_table_const_with_export_surface<'a>(
     semantic_model: &'a SemanticModel,
     index_expr: &LuaIndexExpr,
-) -> Option<&'a ModuleInfo> {
+) -> Option<&'a CompilationModuleInfo> {
     // 获取前缀表达式的语义信息
     let prefix_expr = index_expr.get_prefix_expr()?;
     if let Some(call_expr) = LuaCallExpr::cast(prefix_expr.syntax().clone()) {
         let module_info = parse_require_expr_module_info(semantic_model, &call_expr)?;
-        if module_info.has_export_type() {
+        if compilation_module_has_export_type(semantic_model.get_compilation(), module_info.file_id)
+        {
             return Some(module_info);
         }
     }
@@ -203,7 +208,7 @@ fn check_require_table_const_with_export_surface<'a>(
         .get_decl(&decl_id)?;
 
     let module_info = parse_require_module_info(semantic_model, &decl)?;
-    if module_info.has_export_type() {
+    if compilation_module_has_export_type(semantic_model.get_compilation(), module_info.file_id) {
         return Some(module_info);
     }
     None
@@ -212,7 +217,7 @@ fn check_require_table_const_with_export_surface<'a>(
 fn parse_require_expr_module_info<'a>(
     semantic_model: &'a SemanticModel,
     call_expr: &LuaCallExpr,
-) -> Option<&'a ModuleInfo> {
+) -> Option<&'a CompilationModuleInfo> {
     let arg_list = call_expr.get_args_list()?;
     let first_arg = arg_list.get_args().next()?;
     let require_path_type = semantic_model.infer_expr(first_arg.clone()).ok()?;
@@ -221,14 +226,11 @@ fn parse_require_expr_module_info<'a>(
         _ => return None,
     };
 
-    semantic_model
-        .get_db()
-        .get_module_index()
-        .find_module(&module_path)
+    find_compilation_module_by_path(semantic_model.get_compilation(), &module_path)
 }
 
 fn is_cross_file_member_from_imported_export_table_const(
-    module_info: &ModuleInfo,
+    module_info: &CompilationModuleInfo,
     semantic_decl: Option<LuaSemanticDeclId>,
 ) -> bool {
     if let Some(LuaSemanticDeclId::Member(member_id)) = semantic_decl

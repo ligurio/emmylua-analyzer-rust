@@ -30,10 +30,10 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 // One cached flow query: one ref at one flow node, optionally without replaying
 // pending condition narrows.
 // Example: "what is `x` at flow 42, with current guards applied?"
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FlowQuery {
     var_ref_id: VarRefId,
     var_cache_idx: u32,

@@ -7,6 +7,7 @@ use super::{
     super::{InferGuard, LuaInferCache, instantiate_type_generic, resolve_signature},
     InferFailReason, InferResult,
 };
+
 use crate::{
     CacheEntry, DbIndex, InFiled, LuaFunctionType, LuaGenericType, LuaInstanceType,
     LuaIntersectionType, LuaOperatorMetaMethod, LuaOperatorOwner, LuaSignature, LuaSignatureId,
