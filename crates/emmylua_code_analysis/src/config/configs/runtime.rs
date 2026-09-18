@@ -40,7 +40,12 @@ pub enum EmmyrcLuaVersion {
     /// LuaJIT
     #[serde(rename = "LuaJIT")]
     LuaJIT,
-    #[serde(rename = "LuaJIT2", alias = "LuaJIT 2")]
+    #[serde(
+        rename = "LuaJIT2",
+        alias = "LuaJIT 2",
+        alias = "tarantool",
+        alias = "Tarantool"
+    )]
     LuaJIT2,
     #[serde(rename = "LuaJIT3", alias = "LuaJIT 3")]
     LuaJIT3,

@@ -62,6 +62,10 @@ pub struct Emmyrc {
     pub doc: EmmyrcDoc,
     #[serde(default)]
     pub format: EmmyrcReformat,
+    /// Raw configuration for runtime specific plugins (external diagnostics).
+    /// Example: `"plugin": { "tarantool": { "version": "2.11" } }`.
+    #[serde(default)]
+    pub plugin: HashMap<String, serde_json::Value>,
 }
 
 impl Emmyrc {

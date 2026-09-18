@@ -1,4 +1,5 @@
 mod checker;
+pub mod external;
 mod lua_diagnostic;
 mod lua_diagnostic_code;
 mod lua_diagnostic_config;

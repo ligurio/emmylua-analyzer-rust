@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 pub use super::checker::DiagnosticContext;
-use super::{checker::check_file, lua_diagnostic_config::LuaDiagnosticConfig};
+use super::{checker::check_file, external, lua_diagnostic_config::LuaDiagnosticConfig};
 use crate::{DiagnosticCode, Emmyrc, FileId, LuaCompilation};
 use lsp_types::Diagnostic;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +69,8 @@ impl LuaDiagnostic {
 
         check_file(&mut context, &semantic_model);
 
-        Some(context.get_diagnostics())
+        let mut diagnostics = context.get_diagnostics();
+        diagnostics.extend(external::run_external(file_id, db, &semantic_model));
+        Some(diagnostics)
     }
 }
